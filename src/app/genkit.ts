@@ -41,7 +41,7 @@ const knowledgeBase = {
   forum_mahasiswa_kipk: {
     deskripsi: "Forum Mahasiswa KIPK Universitas Kuningan adalah organisasi yang menaungi seluruh mahasiswa penerima KIPK di Universitas Kuningan.",
     kegiatan: "Kegiatan forum meliputi pendampingan akademik, pelatihan soft skill, mentoring, dan pengabdian masyarakat.",
-    kontak: "Forum dapat dihubungi melalui email: forumkipk@uniku.ac.id atau Instagram: @forumkipkuniku",
+    kontak: "Forum dapat dihubungi melalui email: forumkipk@uniku.ac.id atau Instagram: @forumkipkuniku.",
     aspirasi: "Aspirasi dan keluhan dapat disampaikan melalui formulir online di website forum atau langsung ke pengurus forum."
   }
 };
