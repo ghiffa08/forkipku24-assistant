@@ -1,17 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server';
 import { googleAI, gemini20Flash } from '@genkit-ai/googleai';
 import { genkit, z } from 'genkit';
 import { Redis } from '@upstash/redis';
 
+// Schema definitions
+export const resultSchema = z.object({
+  response: z.string(),
+});
+
 // Inisialisasi Redis untuk caching dan rate limiting
-// Anda perlu mendaftar akun di Upstash (ada tier gratis)
-const redis = new Redis({
+export const redis = new Redis({
   url: process.env.UPSTASH_REDIS_URL || '',
   token: process.env.UPSTASH_REDIS_TOKEN || '',
 });
 
 // Inisialisasi instance AI dengan plugin GoogleAI
-const ai = genkit({
+export const ai = genkit({
   plugins: [
     googleAI({
       apiKey: process.env.GOOGLE_GENAI_API_KEY,
@@ -21,7 +24,7 @@ const ai = genkit({
 });
 
 // Knowledge base yang berisi informasi tentang KIPK dan Universitas Kuningan
-const knowledgeBase = {
+export const knowledgeBase = {
   kipk: {
     deskripsi: "KIPK (Kartu Indonesia Pintar Kuliah) adalah program beasiswa dari pemerintah untuk mahasiswa kurang mampu secara ekonomi tetapi memiliki potensi akademik baik.",
     syarat: "Syarat pendaftaran KIPK: 1) Memiliki NIK/KK aktif, 2) Mempunyai prestasi akademik/non-akademik, 3) Kondisi ekonomi kurang mampu dibuktikan dengan SKTM, 4) Melampirkan slip gaji/penghasilan orang tua, 5) Bukti pembayaran listrik dan PBB.",
@@ -46,13 +49,8 @@ const knowledgeBase = {
   }
 };
 
-// Definisi untuk result schema
-const resultSchema = z.object({
-  response: z.string(),
-});
-
 // Fungsi untuk menghasilkan respons dari knowledge base dengan pencarian yang lebih baik
-const generateResponse = (query: string): string => {
+export const generateResponse = (query: string): string => {
   const queryLower = query.toLowerCase();
   const keywords = queryLower.split(/\s+/); // Split query menjadi keywords
   let bestMatch = { response: "", score: 0 };
@@ -144,7 +142,7 @@ const generateResponse = (query: string): string => {
 };
 
 // Definisi flow untuk menghasilkan respons dari AI yang lebih kontekstual
-const generateAIResponse = ai.defineFlow(
+export const generateAIResponse = ai.defineFlow(
   {
     name: 'generateAIResponse',
     inputSchema: z.object({
@@ -173,23 +171,48 @@ const generateAIResponse = ai.defineFlow(
     Berikan jawaban singkat dan informatif berdasarkan informasi di atas. Jika informasi tidak tersedia, jawab "Mohon maaf, untuk pertanyaan tersebut sebaiknya langsung menghubungi pengurus forum."
     `;
         
-    const response = await ai.generate({ prompt });
-
-
-    return { response };
+    try {
+      const result = await ai.generate({ prompt });
+      
+      // Ensure we're getting valid text content
+      if (result && typeof result.text === 'string') {
+        return { response: result.text };
+      } else {
+        console.error('Invalid AI response format:', result);
+        return { response: "Maaf, terjadi kesalahan dalam memproses pertanyaan Anda. Silakan coba lagi nanti." };
+      }
+    } catch (error) {
+      console.error('Error in AI generation:', error);
+      return { response: "Maaf, terjadi kesalahan dalam memproses pertanyaan Anda. Silakan coba lagi nanti." };
+    }
   }
 );
 
-// Fungsi untuk mendapatkan ID pengguna dari request
-const getUserId = (req: NextRequest): string => {
-  const ip = req.headers.get('x-forwarded-for') || 'unknown';
-  const userAgent = req.headers.get('user-agent') || 'unknown';
+// Cache utilities
+export const getFromCache = async (query: string): Promise<string | null> => {
+  // Sanitasi query untuk digunakan sebagai cache key
+  const sanitizedQuery = query.toLowerCase().trim().replace(/\s+/g, ' ');
+  const key = `cache:${sanitizedQuery}`;
+  return await redis.get(key);
+};
+
+export const saveToCache = async (query: string, response: string): Promise<void> => {
+  const sanitizedQuery = query.toLowerCase().trim().replace(/\s+/g, ' ');
+  const key = `cache:${sanitizedQuery}`;
+  // Simpan dalam cache selama 7 hari
+  await redis.set(key, response, { ex: 7 * 24 * 60 * 60 });
+};
+
+// Rate limiting utilities
+export const getUserId = (req: Request): string => {
+  const headers = new Headers(req.headers);
+  const ip = headers.get('x-forwarded-for') || 'unknown';
+  const userAgent = headers.get('user-agent') || 'unknown';
   // Tambahkan user-agent untuk menghindari false positive pada shared IP
   return `user:${ip}:${userAgent.substring(0, 20)}`;
 };
 
-// Fungsi untuk memeriksa rate limit dengan tracking sisa quota
-const checkRateLimit = async (userId: string): Promise<{isAllowed: boolean, remaining: number}> => {
+export const checkRateLimit = async (userId: string): Promise<{isAllowed: boolean, remaining: number}> => {
   const today = new Date().toISOString().split('T')[0];
   const key = `rate:${userId}:${today}`;
   
@@ -211,93 +234,20 @@ const checkRateLimit = async (userId: string): Promise<{isAllowed: boolean, rema
   };
 };
 
-// Cache untuk menyimpan hasil permintaan yang sama (dengan sanitasi query)
-const getFromCache = async (query: string): Promise<string | null> => {
-  // Sanitasi query untuk digunakan sebagai cache key
-  const sanitizedQuery = query.toLowerCase().trim().replace(/\s+/g, ' ');
-  const key = `cache:${sanitizedQuery}`;
-  return await redis.get(key);
-};
+export const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`Operation timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
-// Menyimpan hasil ke cache
-const saveToCache = async (query: string, response: string): Promise<void> => {
-  const sanitizedQuery = query.toLowerCase().trim().replace(/\s+/g, ' ');
-  const key = `cache:${sanitizedQuery}`;
-  // Simpan dalam cache selama 7 hari
-  await redis.set(key, response, { ex: 7 * 24 * 60 * 60 });
-};
-
-// Handler untuk route POST /api/chat
-export async function POST(req: NextRequest) {
-  try {
-    // Dapatkan ID pengguna
-    const userId = getUserId(req);
-    
-    // Cek rate limit
-    const rateLimit = await checkRateLimit(userId);
-    
-    if (!rateLimit.isAllowed) {
-      return NextResponse.json(
-        { 
-          message: 'Batas penggunaan harian tercapai, silakan coba lagi besok',
-          remainingQuota: 0 
-        },
-        { status: 429 }
-      );
-    }
-    
-    // Parse body
-    const body = await req.json();
-    const { query } = body;
-    
-    if (!query || typeof query !== 'string') {
-      return NextResponse.json(
-        { 
-          message: 'Query tidak valid',
-          remainingQuota: rateLimit.remaining
-        },
-        { status: 400 }
-      );
-    }
-    
-    // Cek cache terlebih dahulu
-    const cachedResponse = await getFromCache(query);
-    if (cachedResponse) {
-      return NextResponse.json({ 
-        response: cachedResponse,
-        remainingQuota: rateLimit.remaining
+    promise
+      .then((result) => {
+        clearTimeout(timeoutId);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        reject(error);
       });
-    }
-    
-    // Coba dapatkan jawaban dari knowledge base
-    let response = generateResponse(query);
-    
-    // Jika tidak ada jawaban, gunakan AI
-    if (response === "AI_GENERATE") {
-      try {
-        const aiResult = await generateAIResponse({ query });
-        response = aiResult.response;
-      } catch (error) {
-        console.error('Error generating AI response:', error);
-        response = "Maaf, saya tidak dapat memberikan jawaban untuk pertanyaan tersebut saat ini. Silakan hubungi pengurus forum melalui email: forumkipk@uniku.ac.id untuk informasi lebih lanjut.";
-      }
-    }
-    
-    // Simpan hasil ke cache
-    await saveToCache(query, response);
-    
-    return NextResponse.json({ 
-      response,
-      remainingQuota: rateLimit.remaining
-    });
-  } catch (error) {
-    console.error('Error in chat API:', error);
-    return NextResponse.json(
-      { 
-        message: 'Terjadi kesalahan internal',
-        remainingQuota: 0
-      },
-      { status: 500 }
-    );
-  }
-}
+  });
+};
